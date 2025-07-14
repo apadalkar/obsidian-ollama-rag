@@ -16,6 +16,10 @@ function cosineSimilarity(a: number[], b: number[]): number {
 }
 
 async function getNoteEmbedding(text: string): Promise<number[]> {
+    if (!text || typeof text !== 'string' || text.trim().length < 10) {
+        new Notice('Text for embedding is empty or too short.');
+        throw new Error('Text for embedding is empty or too short.');
+    }
     try {
         const res = await fetch('http://127.0.0.1:11434/api/embeddings', {
             method: 'POST',
@@ -27,18 +31,21 @@ async function getNoteEmbedding(text: string): Promise<number[]> {
         });
         const data: any = await res.json();
         if (!data || !Array.isArray(data.embedding)) {
+            console.error('Ollama embedding response:', data);
+            new Notice('Ollama did not return a valid embedding. See console for details.');
             throw new Error('Invalid embedding response from Ollama');
         }
         return data.embedding;
-    } catch (err) {
+    } catch (err: any) {
         console.error('Embedding error:', err);
-        new Notice('Failed to get embedding from Ollama. See console for details.');
+        new Notice('Failed to get embedding from Ollama: ' + (err?.message || err));
         throw err;
     }
 }
 
 async function getAICompletion(prompt: string): Promise<string> {
     try {
+        console.log('Prompt sent to Ollama:', prompt);
         const res = await fetch('http://127.0.0.1:11434/api/generate', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -47,14 +54,41 @@ async function getAICompletion(prompt: string): Promise<string> {
                 prompt: prompt
             })
         });
-        const data: any = await res.json();
-        if (!data || typeof data.response !== 'string') {
-            throw new Error('Invalid completion response from Ollama');
+
+        if (!res.body) {
+            throw new Error('No response body from Ollama');
         }
-        return data.response;
-    } catch (err) {
+
+        // Ollama return NDJSON responses
+        const reader = res.body.getReader();
+        let decoder = new TextDecoder();
+        let result = '';
+        let done = false;
+
+        while (!done) {
+            const { value, done: doneReading } = await reader.read();
+            if (value) {
+                const chunk = decoder.decode(value, { stream: true });
+                // NDJSON: split by newlines, parse each line
+                chunk.split('\n').forEach(line => {
+                    if (line.trim()) {
+                        try {
+                            const data = JSON.parse(line);
+                            if (data.response) result += data.response;
+                        } catch (e) {
+                            console.error('Failed to parse NDJSON chunk:', line, e);
+                        }
+                    }
+                });
+            }
+            done = doneReading;
+        }
+
+        console.log('Ollama completion result:', result);
+        return result;
+    } catch (err: any) {
         console.error('Completion error:', err);
-        new Notice('Failed to get completion from Ollama. See console for details.');
+        new Notice('Failed to get completion from Ollama: ' + (err?.message || err));
         throw err;
     }
 }
@@ -183,8 +217,9 @@ export default class MyPlugin extends Plugin {
                 md += `## Answer\n${answer}\n\n`;
                 md += `## Top Relevant Notes\n`;
                 top.forEach((n, i) => {
-                    md += `### ${i+1}. ${n.path} (Score: ${n.score.toFixed(2)})\n`;
-                    md += `> ${n.content.slice(0, 200).replace(/\n/g, ' ')}...\n\n`;
+                    const fileName = n.path.replace(/\.md$/, '');
+                    md += `### ${i+1}. [[${fileName}]] (Score: ${n.score.toFixed(2)})\n`;
+                    md += `> ${n.content.slice(0, 200).replace(/\n/g, ' ')}...\n\n`
                 });
                 try {
                     const file = await this.app.vault.create(
