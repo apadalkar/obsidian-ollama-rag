@@ -271,12 +271,19 @@ class InputModal extends Modal {
     }
     onOpen() {
         const { contentEl } = this;
-        contentEl.createEl('h2', { text: this.prompt });
-        const input = contentEl.createEl('input', { type: 'text' });
-        input.focus();
-        input.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') {
-                this.onSubmit(input.value);
+        //center text for prompt
+        const promptDiv = contentEl.createEl('div', { cls: 'ai-modal-prompt' });
+        promptDiv.createEl('h2', { text: this.prompt });
+
+        const textarea = contentEl.createEl('textarea', { cls: 'ai-modal-textarea', placeholder: 'Type your request...' });
+        textarea.rows = 3;
+        textarea.style.width = '100%';
+        textarea.focus();
+
+        textarea.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                this.onSubmit(textarea.value);
                 this.close();
             }
         });
