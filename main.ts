@@ -1,5 +1,4 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
-
+import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, TFolder } from 'obsidian';
 interface MyPluginSettings {
 	mySetting: string;
 }
@@ -143,7 +142,7 @@ export default class MyPlugin extends Plugin {
 
         this.addCommand({
             id: 'find-notes-relating-to',
-            name: 'Find notes relating to...',
+            name: 'Find notes relating to:',
             callback: async () => {
                 if (embeddingIndex.length === 0) {
                     new Notice('Please run "Index all notes for AI" first.');
@@ -231,6 +230,14 @@ export default class MyPlugin extends Plugin {
                     console.error('File creation error:', err);
                     new Notice('Failed to create AI answer file. See console for details.');
                 }
+            }
+        });
+        
+        this.addCommand({
+            id: 'ai-agent-chat-organize-vault',
+            name: 'AI Agent: Chat and Organize Vault',
+            callback: () => {
+                new AIAgentChatModal(this.app, this).open();
             }
         });
 
@@ -331,5 +338,137 @@ class SampleSettingTab extends PluginSettingTab {
                 ul2.appendChild(li);
             });
         }
+    }
+}
+
+class AIAgentChatModal extends Modal {
+    plugin: Plugin;
+    chatHistory: { role: 'user' | 'assistant', content: string }[] = [];
+    container: HTMLElement;
+
+    constructor(app: App, plugin: Plugin) {
+        super(app);
+        this.plugin = plugin;
+    }
+
+    onOpen() {
+        this.container = this.contentEl;
+        this.container.empty();
+        this.renderChat();
+    }
+
+    renderChat() {
+        this.container.empty();
+        this.container.createEl('h2', { text: 'AI Agent Chat' });
+        this.chatHistory.forEach(msg => {
+            const div = this.container.createDiv({ cls: msg.role });
+            div.createEl('b', { text: msg.role === 'user' ? 'You: ' : 'AI: ' });
+            div.appendText(msg.content);
+        });
+
+        const input = this.container.createEl('input', { type: 'text', placeholder: 'Type your request...' });
+        input.focus();
+        input.addEventListener('keydown', async (e) => {
+            if (e.key === 'Enter' && input.value.trim()) {
+                const userMsg = input.value.trim();
+                this.chatHistory.push({ role: 'user', content: userMsg });
+                this.renderChat();
+                input.value = '';
+                await this.handleUserMessage(userMsg);
+            }
+        });
+    }
+
+async handleUserMessage(userMsg: string) {
+        const systemPrompt = `
+You are an assistant for Obsidian. When the user asks for a file or folder operation, respond ONLY with a JSON array of actions to perform. Each action should have a type (create_file, create_folder, delete_file, delete_folder, update_file), a path, and (for files) content. If the user just wants to chat, respond with a message only (no JSON). Example:
+
+User: Create a folder for the album 'Abbey Road' and a file listing all its songs.
+AI:
+[
+  {"type": "create_folder", "path": "Music/Abbey Road"},
+  {"type": "create_file", "path": "Music/Abbey Road/Tracklist.md", "content": "# Abbey Road Tracklist\\n- Come Together\\n- Something"}
+]
+
+User: Delete the file Music/Abbey Road/Tracklist.md
+AI:
+[
+  {"type": "delete_file", "path": "Music/Abbey Road/Tracklist.md"}
+]
+
+User: Hello!
+AI:
+Hello! How can I help you organize your notes today?
+
+User: ${userMsg}
+AI:
+`;
+// Send prompt to Ollama
+        let aiResponse = '';
+        try {
+            aiResponse = await getAICompletion(systemPrompt);
+        } catch (err) {
+            this.chatHistory.push({ role: 'assistant', content: 'Error: Could not get a response from the AI.' });
+            this.renderChat();
+            return;
+        }
+
+        // Try to parse JSON from the response
+        let actions: any[] = [];
+        let message = '';
+        try {
+            const jsonStart = aiResponse.indexOf('[');
+            const jsonEnd = aiResponse.lastIndexOf(']');
+            if (jsonStart !== -1 && jsonEnd !== -1 && jsonEnd > jsonStart) {
+                const jsonString = aiResponse.slice(jsonStart, jsonEnd + 1);
+                actions = JSON.parse(jsonString);
+            } else {
+                message = aiResponse.trim();
+            }
+        } catch (e) {
+            message = aiResponse.trim();
+        }
+
+        // If actions found, execute them
+        if (actions.length > 0) {
+            let summary = '';
+            for (const action of actions) {
+                try {
+                    if (action.type === 'create_folder') {
+                        await this.plugin.app.vault.createFolder(action.path);
+                        summary += `Created folder: ${action.path}\n`;
+                    } else if (action.type === 'create_file') {
+                        await this.plugin.app.vault.create(action.path, action.content || '');
+                        summary += `Created file: ${action.path}\n`;
+                    } else if (action.type === 'delete_file') {
+                        const file = this.plugin.app.vault.getAbstractFileByPath(action.path);
+                        if (file && file instanceof TFile) {
+                            await this.plugin.app.vault.delete(file);
+                            summary += `Deleted file: ${action.path}\n`;
+                        }
+                    } else if (action.type === 'delete_folder') {
+                        const folder = this.plugin.app.vault.getAbstractFileByPath(action.path);
+                        if (folder && folder instanceof TFolder) {
+                            await this.plugin.app.vault.delete(folder, true);
+                            summary += `Deleted folder: ${action.path}\n`;
+                        }
+                    } else if (action.type === 'update_file') {
+                        const file = this.plugin.app.vault.getAbstractFileByPath(action.path);
+                        if (file && file instanceof TFile) {
+                            await this.plugin.app.vault.modify(file, action.content || '');
+                            summary += `Updated file: ${action.path}\n`;
+                        }
+                    }
+                } catch (err) {
+                    summary += `Error with action on ${action.path}: ${err}\n`;
+                }
+            }
+            this.chatHistory.push({ role: 'assistant', content: summary || 'No actions performed.' });
+        } else if (message) {
+            this.chatHistory.push({ role: 'assistant', content: message });
+        } else {
+            this.chatHistory.push({ role: 'assistant', content: 'No valid actions or message returned.' });
+        }
+        this.renderChat();
     }
 }
