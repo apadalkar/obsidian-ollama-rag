@@ -1,4 +1,4 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, TFolder } from 'obsidian';
+import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, TFolder, WorkspaceLeaf, ItemView } from 'obsidian';
 interface MyPluginSettings {
 	mySetting: string;
 }
@@ -93,6 +93,158 @@ async function getAICompletion(prompt: string): Promise<string> {
 }
 
 let embeddingIndex: { path: string, content: string, embedding: number[] }[] = [];
+
+const AI_AGENT_CHAT_VIEW_TYPE = 'ai-agent-chat-view';
+
+class AIAgentChatView extends ItemView {
+    plugin: Plugin;
+    sessions: { id: string, name: string, chatHistory: { role: 'user' | 'assistant', content: string }[] }[] = [];
+    currentSessionId: string;
+    container: HTMLElement;
+
+    constructor(leaf: WorkspaceLeaf, plugin: Plugin) {
+        super(leaf);
+        this.plugin = plugin;
+        // Start with one session
+        const sessionId = Date.now().toString();
+        this.sessions.push({ id: sessionId, name: 'Session 1', chatHistory: [] });
+        this.currentSessionId = sessionId;
+    }
+
+    getViewType() {
+        return AI_AGENT_CHAT_VIEW_TYPE;
+    }
+
+    getDisplayText() {
+        return 'AI Agent Chat';
+    }
+
+    async onOpen() {
+        this.container = this.contentEl;
+        this.renderChat();
+    }
+
+    renderChat() {
+        this.container.empty();
+        // Session switcher UI (simple dropdown)
+        const sessionRow = this.container.createDiv({ cls: 'ai-agent-session-row' });
+        const select = sessionRow.createEl('select');
+        this.sessions.forEach(session => {
+            const option = select.createEl('option', { text: session.name });
+            option.value = session.id;
+            if (session.id === this.currentSessionId) option.selected = true;
+        });
+        select.addEventListener('change', (e) => {
+            this.currentSessionId = (e.target as HTMLSelectElement).value;
+            this.renderChat();
+        });
+        // New session button
+        const newBtn = sessionRow.createEl('button', { text: '+' });
+        newBtn.addEventListener('click', () => {
+            const newId = Date.now().toString();
+            const name = `Session ${this.sessions.length + 1}`;
+            this.sessions.push({ id: newId, name, chatHistory: [] });
+            this.currentSessionId = newId;
+            this.renderChat();
+        });
+        // Chat UI
+        const session = this.sessions.find(s => s.id === this.currentSessionId);
+        if (!session) return;
+        this.container.createEl('h2', { text: session.name });
+        const chatContainer = this.container.createDiv({ cls: 'ai-agent-chat-container' });
+        session.chatHistory.forEach(msg => {
+            const msgDiv = chatContainer.createDiv({ cls: `ai-agent-chat-message ${msg.role}` });
+            msgDiv.createEl('b', { text: msg.role === 'user' ? 'You: ' : 'AI: ' });
+            msgDiv.appendText(msg.content);
+        });
+        const inputRow = this.container.createDiv({ cls: 'ai-agent-chat-input-row' });
+        const textarea = inputRow.createEl('textarea', { cls: 'ai-agent-chat-input', placeholder: 'Type your request...' });
+        textarea.rows = 4;
+        textarea.style.resize = 'vertical';
+        textarea.focus();
+        const sendBtn = inputRow.createEl('button', { text: 'Send', cls: 'ai-agent-chat-send-btn' });
+        textarea.addEventListener('keydown', async (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendBtn.click();
+            }
+        });
+        sendBtn.addEventListener('click', async () => {
+            if (textarea.value.trim()) {
+                const userMsg = textarea.value.trim();
+                session.chatHistory.push({ role: 'user', content: userMsg });
+                this.renderChat();
+                await this.handleUserMessage(userMsg, session);
+            }
+        });
+    }
+
+    async handleUserMessage(userMsg: string, session: { chatHistory: { role: 'user' | 'assistant', content: string }[] }) {
+        const systemPrompt = `You are an assistant for Obsidian. When the user asks for a file or folder operation, respond ONLY with a JSON array of actions to perform. Each action should have a type (create_file, create_folder, delete_file, delete_folder, update_file), a path, and (for files) content. If the user just wants to chat, respond with a message only (no JSON). Example:\n\nUser: Create a folder for the album 'Abbey Road' and a file listing all its songs.\nAI:\n[\n  {"type": "create_folder", "path": "Music/Abbey Road"},\n  {"type": "create_file", "path": "Music/Abbey Road/Tracklist.md", "content": "# Abbey Road Tracklist\\n- Come Together\\n- Something"}\n]\n\nUser: Delete the file Music/Abbey Road/Tracklist.md\nAI:\n[\n  {"type": "delete_file", "path": "Music/Abbey Road/Tracklist.md"}\n]\n\nUser: Hello!\nAI:\nHello! How can I help you organize your notes today?\n\nUser: ${userMsg}\nAI:`;
+        let aiResponse = '';
+        try {
+            aiResponse = await getAICompletion(systemPrompt);
+        } catch (err) {
+            session.chatHistory.push({ role: 'assistant', content: 'Error: Could not get a response from the AI.' });
+            this.renderChat();
+            return;
+        }
+        let actions: any[] = [];
+        let message = '';
+        try {
+            const jsonStart = aiResponse.indexOf('[');
+            const jsonEnd = aiResponse.lastIndexOf(']');
+            if (jsonStart !== -1 && jsonEnd !== -1 && jsonEnd > jsonStart) {
+                const jsonString = aiResponse.slice(jsonStart, jsonEnd + 1);
+                actions = JSON.parse(jsonString);
+            } else {
+                message = aiResponse.trim();
+            }
+        } catch (e) {
+            message = aiResponse.trim();
+        }
+        if (actions.length > 0) {
+            let summary = '';
+            for (const action of actions) {
+                try {
+                    if (action.type === 'create_folder') {
+                        await this.plugin.app.vault.createFolder(action.path);
+                        summary += `Created folder: ${action.path}\n`;
+                    } else if (action.type === 'create_file') {
+                        await this.plugin.app.vault.create(action.path, action.content || '');
+                        summary += `Created file: ${action.path}\n`;
+                    } else if (action.type === 'delete_file') {
+                        const file = this.plugin.app.vault.getAbstractFileByPath(action.path);
+                        if (file && file instanceof TFile) {
+                            await this.plugin.app.vault.delete(file);
+                            summary += `Deleted file: ${action.path}\n`;
+                        }
+                    } else if (action.type === 'delete_folder') {
+                        const folder = this.plugin.app.vault.getAbstractFileByPath(action.path);
+                        if (folder && folder instanceof TFolder) {
+                            await this.plugin.app.vault.delete(folder, true);
+                            summary += `Deleted folder: ${action.path}\n`;
+                        }
+                    } else if (action.type === 'update_file') {
+                        const file = this.plugin.app.vault.getAbstractFileByPath(action.path);
+                        if (file && file instanceof TFile) {
+                            await this.plugin.app.vault.modify(file, action.content || '');
+                            summary += `Updated file: ${action.path}\n`;
+                        }
+                    }
+                } catch (err) {
+                    summary += `Error with action on ${action.path}: ${err}\n`;
+                }
+            }
+            session.chatHistory.push({ role: 'assistant', content: summary || 'No actions performed.' });
+        } else if (message) {
+            session.chatHistory.push({ role: 'assistant', content: message });
+        } else {
+            session.chatHistory.push({ role: 'assistant', content: 'No valid actions or message returned.' });
+        }
+        this.renderChat();
+    }
+}
 
 export default class MyPlugin extends Plugin {
     settings: MyPluginSettings;
@@ -241,6 +393,14 @@ export default class MyPlugin extends Plugin {
             }
         });
 
+        this.addCommand({
+            id: 'open-ai-agent-chat-sidebar',
+            name: 'Open AI Agent Chat (Sidebar)',
+            callback: () => {
+                this.activateView();
+            }
+        });
+
         this.addSettingTab(new SampleSettingTab(this.app, this));
 
         this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
@@ -248,6 +408,25 @@ export default class MyPlugin extends Plugin {
         });
 
         this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
+
+        this.registerView(
+            AI_AGENT_CHAT_VIEW_TYPE,
+            (leaf) => new AIAgentChatView(leaf, this)
+        );
+    }
+
+    async activateView() {
+        let leaf = this.app.workspace.getLeavesOfType(AI_AGENT_CHAT_VIEW_TYPE)[0];
+        if (!leaf) {
+            const rightLeaf = this.app.workspace.getRightLeaf(false);
+            if (!rightLeaf) return;
+            await rightLeaf.setViewState({
+                type: AI_AGENT_CHAT_VIEW_TYPE,
+                active: true,
+            });
+            leaf = rightLeaf;
+        }
+        this.app.workspace.revealLeaf(leaf);
     }
 
     onunload() {}
@@ -422,7 +601,6 @@ Hello! How can I help you organize your notes today?
 User: ${userMsg}
 AI:
 `;
-// Send prompt to Ollama
         let aiResponse = '';
         try {
             aiResponse = await getAICompletion(systemPrompt);
