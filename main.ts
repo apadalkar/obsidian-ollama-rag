@@ -148,7 +148,7 @@ export default class MyPlugin extends Plugin {
                     new Notice('Please run "Index all notes for AI" first.');
                     return;
                 }
-                const query = await this.promptUser('Enter your query (e.g., high school):');
+                const query = await this.promptUser('Enter your query (ie. Find notes related to high school):');
                 if (!query) return;
                 let queryEmbedding: number[];
                 try {
@@ -367,20 +367,32 @@ class AIAgentChatModal extends Modal {
     renderChat() {
         this.container.empty();
         this.container.createEl('h2', { text: 'AI Agent Chat' });
+        const chatContainer = this.container.createDiv({ cls: 'ai-agent-chat-container' });
         this.chatHistory.forEach(msg => {
-            const div = this.container.createDiv({ cls: msg.role });
-            div.createEl('b', { text: msg.role === 'user' ? 'You: ' : 'AI: ' });
-            div.appendText(msg.content);
+            const msgDiv = chatContainer.createDiv({ cls: `ai-agent-chat-message ${msg.role}` });
+            msgDiv.createEl('b', { text: msg.role === 'user' ? 'You: ' : 'AI: ' });
+            msgDiv.appendText(msg.content);
         });
 
-        const input = this.container.createEl('input', { type: 'text', placeholder: 'Type your request...' });
-        input.focus();
-        input.addEventListener('keydown', async (e) => {
-            if (e.key === 'Enter' && input.value.trim()) {
-                const userMsg = input.value.trim();
+        const inputRow = this.container.createDiv({ cls: 'ai-agent-chat-input-row' });
+        const textarea = inputRow.createEl('textarea', { cls: 'ai-agent-chat-input', placeholder: 'Type your request...' });
+        textarea.rows = 2;
+        textarea.style.resize = 'vertical';
+        textarea.focus();
+        const sendBtn = inputRow.createEl('button', { text: 'Send', cls: 'ai-agent-chat-send-btn' });
+
+        // Send on Enter (but allow Shift+Enter for newline)
+        textarea.addEventListener('keydown', async (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendBtn.click();
+            }
+        });
+        sendBtn.addEventListener('click', async () => {
+            if (textarea.value.trim()) {
+                const userMsg = textarea.value.trim();
                 this.chatHistory.push({ role: 'user', content: userMsg });
                 this.renderChat();
-                input.value = '';
                 await this.handleUserMessage(userMsg);
             }
         });

@@ -22,3 +22,60 @@ If your plugin does not need CSS, delete this file.
     border: 1px solid var(--background-modifier-border);
     resize: vertical;
 }
+.ai-agent-chat-container {
+    display: flex;
+    flex-direction: column;
+    gap: 1em;
+    padding: 1em 0;
+}
+
+.ai-agent-chat-message {
+    max-width: 80%;
+    padding: 0.75em 1em;
+    border-radius: 12px;
+    margin-bottom: 0.5em;
+    font-size: 1em;
+    word-break: break-word;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.04);
+}
+
+.ai-agent-chat-message.user {
+    align-self: flex-end;
+    background: var(--interactive-accent);
+    color: var(--text-on-accent);
+}
+
+.ai-agent-chat-message.assistant {
+    align-self: flex-start;
+    background: var(--background-secondary-alt);
+    color: var(--text-normal);
+}
+
+.ai-agent-chat-input-row {
+    display: flex;
+    gap: 0.5em;
+    margin-top: 1em;
+}
+
+.ai-agent-chat-input {
+    flex: 1;
+    padding: 0.5em 1em;
+    border-radius: 8px;
+    border: 1px solid var(--background-modifier-border);
+    font-size: 1em;
+}
+
+.ai-agent-chat-send-btn {
+    padding: 0.5em 1.2em;
+    border-radius: 8px;
+    border: none;
+    background: var(--interactive-accent);
+    color: var(--text-on-accent);
+    font-weight: bold;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.ai-agent-chat-send-btn:hover {
+    background: var(--interactive-accent-hover);
+}
