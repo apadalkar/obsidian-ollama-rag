@@ -376,7 +376,7 @@ class AIAgentChatModal extends Modal {
 
         const inputRow = this.container.createDiv({ cls: 'ai-agent-chat-input-row' });
         const textarea = inputRow.createEl('textarea', { cls: 'ai-agent-chat-input', placeholder: 'Type your request...' });
-        textarea.rows = 2;
+        textarea.rows = 4;
         textarea.style.resize = 'vertical';
         textarea.focus();
         const sendBtn = inputRow.createEl('button', { text: 'Send', cls: 'ai-agent-chat-send-btn' });
