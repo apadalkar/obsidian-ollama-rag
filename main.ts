@@ -1,4 +1,8 @@
 import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, TFolder, WorkspaceLeaf, ItemView } from 'obsidian';
+import { Ollama, OllamaEmbeddings } from '@langchain/ollama';
+import { MemoryVectorStore } from 'langchain/vectorstores/memory';
+import { Document } from '@langchain/core/documents';
+import { RecursiveCharacterTextSplitter } from '@langchain/textsplitters';
 interface MyPluginSettings {
 	mySetting: string;
 }
@@ -14,85 +18,46 @@ function cosineSimilarity(a: number[], b: number[]): number {
     return dot / (normA * normB);
 }
 
+const ollamaEmbeddings = new OllamaEmbeddings({
+    model: 'nomic-embed-text',
+    baseUrl: 'http://127.0.0.1:11434',
+});
+
 async function getNoteEmbedding(text: string): Promise<number[]> {
     if (!text || typeof text !== 'string' || text.trim().length < 10) {
         new Notice('Text for embedding is empty or too short.');
         throw new Error('Text for embedding is empty or too short.');
     }
     try {
-        const res = await fetch('http://127.0.0.1:11434/api/embeddings', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                model: 'nomic-embed-text',
-                prompt: text
-            })
-        });
-        const data: any = await res.json();
-        if (!data || !Array.isArray(data.embedding)) {
-            console.error('Ollama embedding response:', data);
-            new Notice('Ollama did not return a valid embedding. See console for details.');
-            throw new Error('Invalid embedding response from Ollama');
-        }
-        return data.embedding;
+        const vector = await ollamaEmbeddings.embedQuery(text);
+        return vector;
     } catch (err: any) {
         console.error('Embedding error:', err);
-        new Notice('Failed to get embedding from Ollama: ' + (err?.message || err));
+        new Notice('Failed to get embedding from Ollama (LangChain): ' + (err?.message || err));
         throw err;
     }
 }
 
+const ollamaLLM = new Ollama({
+    model: 'llama3',
+    baseUrl: 'http://127.0.0.1:11434',
+});
+
 async function getAICompletion(prompt: string): Promise<string> {
     try {
-        console.log('Prompt sent to Ollama:', prompt);
-        const res = await fetch('http://127.0.0.1:11434/api/generate', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                model: 'llama3',
-                prompt: prompt
-            })
-        });
-
-        if (!res.body) {
-            throw new Error('No response body from Ollama');
-        }
-
-        // Ollama return NDJSON responses
-        const reader = res.body.getReader();
-        let decoder = new TextDecoder();
-        let result = '';
-        let done = false;
-
-        while (!done) {
-            const { value, done: doneReading } = await reader.read();
-            if (value) {
-                const chunk = decoder.decode(value, { stream: true });
-                // NDJSON: split by newlines, parse each line
-                chunk.split('\n').forEach(line => {
-                    if (line.trim()) {
-                        try {
-                            const data = JSON.parse(line);
-                            if (data.response) result += data.response;
-                        } catch (e) {
-                            console.error('Failed to parse NDJSON chunk:', line, e);
-                        }
-                    }
-                });
-            }
-            done = doneReading;
-        }
-
+        console.log('Prompt sent to Ollama (LangChain):', prompt);
+        const result = await ollamaLLM.invoke(prompt);
         console.log('Ollama completion result:', result);
         return result;
     } catch (err: any) {
         console.error('Completion error:', err);
-        new Notice('Failed to get completion from Ollama: ' + (err?.message || err));
+        new Notice('Failed to get completion from Ollama (LangChain): ' + (err?.message || err));
         throw err;
     }
 }
 
 let embeddingIndex: { path: string, content: string, embedding: number[] }[] = [];
+let vectorStore: MemoryVectorStore | null = null;
 
 const AI_AGENT_CHAT_VIEW_TYPE = 'ai-agent-chat-view';
 
@@ -269,7 +234,13 @@ export default class MyPlugin extends Plugin {
             callback: async () => {
                 new Notice('Indexing all notes for AI...');
                 embeddingIndex = [];
+                vectorStore = null;
                 const files = this.app.vault.getMarkdownFiles();
+                const splitter = new RecursiveCharacterTextSplitter({
+                    chunkSize: 1000,
+                    chunkOverlap: 200,
+                });
+                const docs: Document[] = [];
                 for (const file of files) {
                     if (file.name.startsWith('Related Notes - ') || file.name.startsWith('AI Answer - ')) {
                         continue;
@@ -279,16 +250,25 @@ export default class MyPlugin extends Plugin {
                         continue;
                     }
                     try {
-                        const embedding = await getNoteEmbedding(content);
-                        if (!Array.isArray(embedding) || embedding.length === 0 || !embedding.every(x => typeof x === 'number')) {
-                            continue;
+                        const chunks = await splitter.splitText(content);
+                        for (const chunk of chunks) {
+                            docs.push(new Document({
+                                pageContent: chunk,
+                                metadata: { path: file.path },
+                            }));
                         }
-                        embeddingIndex.push({ path: file.path, content, embedding });
                     } catch (e) {
-                        new Notice(`Embedding failed for ${file.path}`);
+                        console.error('Chunking failed for', file.path, e);
+                        new Notice(`Chunking failed for ${file.path}`);
                     }
                 }
-                new Notice('Indexing complete!');
+                try {
+                    vectorStore = await MemoryVectorStore.fromDocuments(docs, ollamaEmbeddings);
+                    new Notice('Indexing complete!');
+                } catch (e) {
+                    console.error('Vector store build failed:', e);
+                    new Notice('Failed to build vector store. See console for details.');
+                }
             }
         });
 
@@ -296,31 +276,21 @@ export default class MyPlugin extends Plugin {
             id: 'find-notes-relating-to',
             name: 'Find notes relating to:',
             callback: async () => {
-                if (embeddingIndex.length === 0) {
+                if (!vectorStore) {
                     new Notice('Please run "Index all notes for AI" first.');
                     return;
                 }
                 const query = await this.promptUser('Enter your query (ie. Find notes related to high school):');
                 if (!query) return;
-                let queryEmbedding: number[];
                 try {
-                    queryEmbedding = await getNoteEmbedding(query);
-                } catch (err) {
-                    return;
-                }
-                const scored = embeddingIndex.map(n => ({
-                    ...n,
-                    score: cosineSimilarity(queryEmbedding, n.embedding)
-                }));
-                scored.sort((a, b) => b.score - a.score);
-                const top = scored.slice(0, 10);
-                let md = `# Top Related Notes for: ${query}\n\n`;
-                top.forEach((n, i) => {
-                    const fileName = n.path.replace(/\.md$/, '');
-                    md += `## ${i+1}. [[${fileName}]] (Score: ${n.score.toFixed(2)})\n`;
-                    md += `> ${n.content.slice(0, 200).replace(/\n/g, ' ')}...\n\n`;
-                });
-                try {
+                    const results = await vectorStore.similaritySearchWithScore(query, 10);
+                    let md = `# Top Related Notes for: ${query}\n\n`;
+                    results.forEach(([doc, score], i) => {
+                        const path = (doc.metadata?.path as string) || '';
+                        const fileName = path.replace(/\.md$/, '');
+                        md += `## ${i + 1}. [[${fileName}]] (Score: ${Number(score).toFixed(3)})\n`;
+                        md += `> ${doc.pageContent.slice(0, 200).replace(/\n/g, ' ')}...\n\n`;
+                    });
                     const file = await this.app.vault.create(
                         `Related Notes - ${query} - ${Date.now()}.md`,
                         md
@@ -328,8 +298,8 @@ export default class MyPlugin extends Plugin {
                     new Notice('Related notes written to new file.');
                     await this.app.workspace.getLeaf(true).openFile(file);
                 } catch (err) {
-                    console.error('File creation error:', err);
-                    new Notice('Failed to create related notes file. See console for details.');
+                    console.error('Similarity search error:', err);
+                    new Notice('Failed to search related notes. See console for details.');
                 }
             }
         });
@@ -338,49 +308,37 @@ export default class MyPlugin extends Plugin {
             id: 'ask-ai-about-notes',
             name: 'Ask AI about my notes',
             callback: async () => {
-                if (embeddingIndex.length === 0) {
+                if (!vectorStore) {
                     new Notice('Please run "Index all notes for AI" first.');
                     return;
                 }
                 const question = await this.promptUser('Ask a question about your notes:');
                 if (!question) return;
-                let questionEmbedding: number[];
                 try {
-                    questionEmbedding = await getNoteEmbedding(question);
-                } catch (err) {
-                    return;
-                }
-                const scored = embeddingIndex.map(n => ({
-                    ...n,
-                    score: cosineSimilarity(questionEmbedding, n.embedding)
-                }));
-                scored.sort((a, b) => b.score - a.score);
-                const top = scored.slice(0, 3);
-                const context = top.map(n => `Note: ${n.path}\n${n.content}`).join('\n---\n');
-                const prompt = `You are an assistant with access to my notes. Use the following notes to answer the question.\n\n${context}\n\nQuestion: ${question}\nAnswer:`;
-                let answer: string;
-                try {
-                    answer = await getAICompletion(prompt);
-                } catch (err) {
-                    return;
-                }
-                let md = `# AI Answer to: ${question}\n\n`;
-                md += `## Answer\n${answer}\n\n`;
-                md += `## Top Relevant Notes\n`;
-                top.forEach((n, i) => {
-                    const fileName = n.path.replace(/\.md$/, '');
-                    md += `### ${i+1}. [[${fileName}]] (Score: ${n.score.toFixed(2)})\n`;
-                    md += `> ${n.content.slice(0, 200).replace(/\n/g, ' ')}...\n\n`
-                });
-                try {
-                    const file = await this.app.vault.create(
+                    const topDocs = await vectorStore.similaritySearch(question, 3);
+                    const context = topDocs
+                        .map(d => `Note: ${(d.metadata?.path as string) || ''}\n${d.pageContent}`)
+                        .join('\n---\n');
+                    const prompt = `You are an assistant with access to my notes. Use the following notes to answer the question.\n\n${context}\n\nQuestion: ${question}\nAnswer:`;
+                    const answer = await getAICompletion(prompt);
+
+                    let md = `# AI Answer to: ${question}\n\n`;
+                    md += `## Answer\n${answer}\n\n`;
+                    md += `## Top Relevant Notes\n`;
+                    topDocs.forEach((d, i) => {
+                        const path = (d.metadata?.path as string) || '';
+                        const fileName = path.replace(/\.md$/, '');
+                        md += `### ${i + 1}. [[${fileName}]]\n`;
+                        md += `> ${d.pageContent.slice(0, 200).replace(/\n/g, ' ')}...\n\n`;
+                    });
+                    await this.app.vault.create(
                         `AI Answer - ${question} - ${Date.now()}.md`,
                         md
                     );
                     new Notice('AI answer written to new file.');
                 } catch (err) {
-                    console.error('File creation error:', err);
-                    new Notice('Failed to create AI answer file. See console for details.');
+                    console.error('Ask AI error:', err);
+                    new Notice('Failed to get AI answer. See console for details.');
                 }
             }
         });

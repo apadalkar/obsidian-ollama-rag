@@ -1,11 +1,11 @@
 # Obsidian Ollama RAG Plugin
 
-This is an Obsidian Ollama RAG Plugin that brings AI-powered search, question answering, and local chat to your vault. Index your notes, query them semantically, and chat with an LLM, all running locally through Ollama, with no cloud dependencies.
+This is an Obsidian Ollama RAG Plugin that brings AI-powered search, question answering, and local chat to your vault. Index your notes, query them semantically, and chat with an LLM — all running locally via LangChain + Ollama, with no cloud dependencies.
 
 ## Features
-- **Index all notes for AI**: Prepares your notes for AI-powered search and Q&A.
-- **Find notes relating to...**: Find the most relevant notes for a topic or phrase.
-- **Ask AI about my notes**: Ask questions and get answers using your notes and a local AI model.
+- **Index all notes for AI**: Chunks notes and builds an in-memory vector index for semantic search (LangChain MemoryVectorStore).
+- **Find notes relating to...**: Retrieve the most relevant note chunks for a topic or phrase using embeddings.
+- **Ask AI about my notes**: Retrieve top context from your notes and answer using a local LLM.
 - **AI Agent: Chat and Organize Vault**: Prompt the model to complete desired tasks.
 
 ## How to Use
@@ -14,7 +14,7 @@ This is an Obsidian Ollama RAG Plugin that brings AI-powered search, question an
    - `Index all notes for AI`
    - `Find notes relating to...`
    - `Ask AI about my notes`
-3. **Run the 'Index all notes for AI' command** to use the other features. For search or Q&A, you'll be prompted for input.
+3. **Run the 'Index all notes for AI' command** to enable search and Q&A. Re-run after large edits or new notes.
 
 ## Terminal Setup (Ollama) 
 1. **Install Ollama** (macOS):
@@ -25,13 +25,16 @@ This is an Obsidian Ollama RAG Plugin that brings AI-powered search, question an
    ```sh
    ollama serve
    ```
-3. **Pull a model (e.g., llama3):**
+3. **Pull required models:**
    ```sh
-   ollama pull llama3
+    ollama pull nomic-embed-text
+    ollama pull llama3
    ```
+   Both are required (embeddings + chat LLM).
 
 ## Troubleshooting
 - If you don't see the commands, make sure the plugin is enabled in Obsidian.
 - If you add or change notes, re-run `Index all notes for AI` for best results.
 - If you have issues with AI responses, check that Ollama is running and the model is pulled.
+- The index is in-memory. After restarting Obsidian, run `Index all notes for AI` again.
 
